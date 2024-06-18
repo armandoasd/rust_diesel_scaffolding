@@ -1,0 +1,65 @@
+
+// -- Start {{table_name}}
+
+{{#unless multiple_pk}}
+#[web::get("/{{table_name_singular}}/{ {{~table_name_singular~}} _id}")]
+async fn get_{{table_name_singular}}_by_id(
+    pool: web::types::State<db::DbPool>,
+    {{table_name_singular}}_uid: web::types::Path<i64>,
+) -> Result<web::HttpResponse, web::Error> {
+    let {{table_name_singular}}_uid = {{table_name_singular}}_uid.into_inner();
+    let mut conn = pool.get().expect("couldn't get db connection from pool");
+
+    // use web::block to offload blocking Diesel code without blocking server thread
+    let {{table_name_singular}} = web::block(move || actions::find_{{table_name_singular}}_by_uid({{table_name_singular}}_uid, &mut conn)).await?;
+
+    if let Some({{table_name_singular}}) = {{table_name_singular}} {
+        Ok(web::HttpResponse::Ok().json(&{{table_name_singular}}))
+    } else {
+        let res = web::HttpResponse::NotFound()
+            .body(format!("No {{table_name_singular}} found with uid: {}", {{table_name_singular}}_uid));
+        Ok(res)
+    }
+}
+
+#[web::get("/{{table_name_singular}}")]
+async fn get_{{table_name}}(
+    pool: web::types::State<db::DbPool>,
+) -> Result<web::HttpResponse, web::Error> {
+    let mut conn = pool.get().expect("couldn't get db connection from pool");
+
+    // use web::block to offload blocking Diesel code without blocking server thread
+    let {{table_name_singular}}_list = web::block(move || actions::find_{{table_name}}(&mut conn)).await?;
+
+    Ok(web::HttpResponse::Ok().json(&{{table_name_singular}}_list))
+}
+
+{{#if one_to_many[0]}}
+#[web::get("/{{table_name_singular}}_eager/")]
+async fn get_{{table_name}}_eager(
+    pool: web::types::State<db::DbPool>,
+) -> Result<web::HttpResponse, web::Error> {
+    let mut conn = pool.get().expect("couldn't get db connection from pool");
+
+    // use web::block to offload blocking Diesel code without blocking server thread
+    let {{table_name_singular}}_list = web::block(move || actions::find_{{table_name_singular}}_with_all(&mut conn)).await?;
+
+    Ok(web::HttpResponse::Ok().json(&{{table_name_singular}}_list))
+}
+{{/if}}
+
+#[web::post("/{{table_name_singular}}")]
+async fn add_{{table_name_singular}}(
+    pool: web::types::State<db::DbPool>,
+    form: web::types::Json<model::New{{class_name}}>,
+) -> Result<web::HttpResponse, web::Error> {
+    let mut conn = pool.get().expect("couldn't get db connection from pool");
+
+    // use web::block to offload blocking Diesel code without blocking server thread
+    let {{table_name_singular}} = web::block(move || actions::insert_new_{{table_name_singular}}(form.into_inner(), &mut conn)).await?;
+
+    Ok(web::HttpResponse::Ok().json(&{{table_name_singular}}))
+}
+{{/unless}}
+
+// -- End {{table_name_singular}}

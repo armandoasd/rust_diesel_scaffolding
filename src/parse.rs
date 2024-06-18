@@ -1,12 +1,19 @@
 use convert_case::{Case, Casing};
-use std::collections::HashMap;
+use handlebars::{handlebars_helper, Handlebars};
+use serde_json::{json, Value};
+use std::collections::{BTreeMap, HashMap};
+use std::fmt::format;
 use std::io::{stderr, Write};
+use serde::{Serialize};
 
 pub struct ParseOutput {
     pub str_proto: String,
     pub str_request: String,
     pub str_rpc: String,
     pub str_model: String,
+    pub str_ts_model: String,
+    pub str_action: String,
+    pub str_crud_controller: String,
     pub str_from_proto: String,
     pub str_into_proto: String,
     pub type_nd: bool,
@@ -17,6 +24,10 @@ pub struct ParseOutput {
     pub type_uuid: bool,
     pub type_tz: bool,
     pub type_jsonb: bool,
+    pub type_new_insertable: bool,
+    pub type_json_serializable: bool,
+    pub type_bit_bool: bool,
+    pub crud_methods: Vec<String>,
 }
 
 pub fn parse(
@@ -30,6 +41,9 @@ pub fn parse(
 ) -> ParseOutput {
     //Parse
     let mut str_model: String = "".to_string();
+    let mut str_ts_model: String = "".to_string();
+    let mut str_action: String = "".to_string();
+    let mut str_crud_controller: String = "".to_string();
     let mut str_proto: String = "".to_string();
     let mut str_from_proto: String = "".to_string();
     let mut str_into_proto: String = "".to_string();
@@ -45,12 +59,24 @@ pub fn parse(
         mut type_uuid,
         mut type_tz,
         mut type_jsonb,
-    ) = (false, false, false, false, false, false, false, false);
+        mut type_new_insertable,
+        mut type_json_serializable,
+        mut type_bit_bool,
+    ) = (
+        false, false, false, false, false, false, false, false, true, true, false,
+    );
 
     let mut count: u16 = 0;
     let mut struct_name: String = "".to_string();
+    let mut table_name: String = "".to_string();
+    let mut crud_methods: Vec<String> = Vec::new();
     let content = contents.replace('\t', "    ");
     let lines = content.split('\n');
+    let mut relationships: MappedRelationships = MappedRelationships {
+        one_to_many: Vec::new(),
+        many_to_one:Vec::new()
+    };
+    let has_one_to_many = false;
     let mut model_type_dict: HashMap<&str, &str> = [
         ("Int2", "i16"),
         ("SmallInt", "i16"), //sqlite
@@ -84,7 +110,7 @@ pub fn parse(
         ("Tinyblob", "Vec<u8>"),
         ("Mediumblob", "Vec<u8>"),
         ("Longblob", "Vec<u8>"),
-        ("Bit", "bool"),
+        ("Bit", "BitBool"),
         ("Inet", "IpNetwork"),
         ("Tinytext", "String"),
         ("Mediumtext", "String"),
@@ -96,6 +122,56 @@ pub fn parse(
         ("Unsigned<Smallint", "u16"),
         ("Bigint", "i64"),
         ("Unsigned<Bigint", "u64"),
+    ]
+    .iter()
+    .cloned()
+    .collect();
+
+    let mut ts_interface_type_dict: HashMap<&str, &str> = [
+        ("Int2", "number"),
+        ("SmallInt", "number"), //sqlite
+        ("Int4", "number"),
+        ("Integer", "number"), //sqlite
+        ("Unsigned<Integer", "number"),
+        ("Unsigned<Decimal", "number"),
+        ("Int8", "number"),
+        ("BigInt", "number"),
+        ("Numeric", "number"),
+        ("Decimal", "number"),
+        ("Text", "string"),
+        ("Date", "Date"),
+        ("Time", "Date"),
+        ("Datetime", "Date"),
+        ("Timestamp", "Date"),
+        ("Timestamptz", "Date"),
+        ("Float4", "number"),
+        ("Float8", "number"),
+        ("Float", "number"), //sqlite
+        ("Bool", "number"),
+        ("Json", "Object"),
+        ("Jsonb", "Object"),
+        ("Uuid", "string"),
+        ("Char", "string"),
+        ("Varchar", "string"),
+        ("Bytea", "number[]"),
+        ("Binary", "number[]"),
+        ("Varbinary", "number[]"),
+        ("Blob", "number[]"),
+        ("Tinyblob", "number[]"),
+        ("Mediumblob", "number[]"),
+        ("Longblob", "number[]"),
+        ("Bit", "number"),
+        ("Inet", "IpNetwork"),
+        ("Tinytext", "string"),
+        ("Mediumtext", "string"),
+        ("Longtext", "string"),
+        ("Double", "number"),
+        ("Tinyint", "number"),
+        ("Unsigned<Tinyint", "number"),
+        ("Smallint", "number"),
+        ("Unsigned<Smallint", "number"),
+        ("Bigint", "number"),
+        ("Unsigned<Bigint", "number"),
     ]
     .iter()
     .cloned()
@@ -130,8 +206,10 @@ pub fn parse(
     }
 
     let mut is_schema = false;
+    let mut pks_list: Vec<String> = vec![];
+    let mut multiple_pk= false;
     // let mut is_excluding = true;
-    for line in lines {
+    for line in lines.clone() {
         let cmp = line.trim().to_string();
         let vec: Vec<&str> = cmp.split(' ').collect();
         let indent_depth = if is_schema { 4 } else { 0 };
@@ -149,14 +227,22 @@ pub fn parse(
             str_model.push_str(&format!(
                 "\n{}#[derive({})]\n",
                 " ".repeat(indent_depth),
+                "Joinable"
+            ));
+            str_model.push_str(&format!(
+                "{}#[derive({})]\n",
+                " ".repeat(indent_depth),
                 &format!(
                     "{}{{trace1}}",
-                    model_derives.as_deref().unwrap_or("Queryable, Debug")
+                    model_derives
+                        .as_deref()
+                        .unwrap_or("Identifiable, Queryable, Debug, Selectable, Serialize, Deserialize, Clone, *Associations*, PartialEq")
                 )
             ));
         } else if cmp.contains(") {") {
             // this line contains table name
             struct_name = propercase(vec[0]);
+            table_name = vec[0].to_string();
             if is_schema {
                 struct_name = if struct_name.contains('.') {
                     let _v: Vec<&str> = struct_name.split('.').collect();
@@ -165,8 +251,9 @@ pub fn parse(
                     struct_name
                 }
             }
+            multiple_pk = false;
             let x: &[_] = &['(', ')', '{', '}', ',', ' '];
-            let mut pks_list: Vec<String> = vec![];
+            pks_list = vec![];
             if vec.len() >= 3 {
                 for c in &vec[1..vec.len() - 1] {
                     let pks = c.trim_matches(x);
@@ -175,17 +262,18 @@ pub fn parse(
                 }
 
                 if pks_list.len() > 1 || pks_list[0] != "id" {
-                    str_model = str_model.replace(
-                        "{trace1}",
-                        if model_derives.is_none()
-                            || (model_derives.is_some()
-                                && !model_derives.clone().unwrap().contains("Identifiable"))
-                        {
-                            ", Identifiable"
-                        } else {
-                            ""
-                        },
-                    );
+                    multiple_pk = true;
+                    // str_model = str_model.replace(
+                    //     "{trace1}",
+                    //     if model_derives.is_none()
+                    //         || (model_derives.is_some()
+                    //             && !model_derives.clone().unwrap().contains("Identifiable"))
+                    //     {
+                    //         ", Identifiable"
+                    //     } else {
+                    //         ""
+                    //     },
+                    // );
                     if diesel_version == "2" {
                         str_model.push_str(&" ".repeat(indent_depth));
                         str_model.push_str("#[diesel(primary_key(");
@@ -199,27 +287,117 @@ pub fn parse(
                     }
                 }
             }
+            let table_name_singular = singular(&table_name.clone());
+            relationships = find_relationships(lines.clone(), table_name.clone(), false);
+            if multiple_pk {
 
-            if add_table_name {
-                if diesel_version == "2" {
-                    // add #[diesel(table_name = "name")]
-                    str_model.push_str(&format!(
-                        "{}#[diesel(table_name = {})]\n",
-                        " ".repeat(indent_depth),
-                        vec[0].split('.').last().unwrap()
-                    ));
-                } else {
-                    // add #[table_name = "name"]
-                    str_model.push_str(&format!(
-                        "{}#[table_name = \"{}\"]\n",
-                        " ".repeat(indent_depth),
-                        vec[0].split('.').last().unwrap()
+            } else {
+                crud_methods.push(format!("get_{table_name_singular}_by_id"));
+                crud_methods.push(format!("get_{table_name}"));
+                if relationships.clone().one_to_many.len() > 0 {
+                    crud_methods.push(format!("get_{table_name}_eager"));
+                }
+                crud_methods.push(format!("add_{table_name_singular}"));
+            }
+
+            
+
+
+            str_crud_controller.push_str(&generate_crud_controllers(
+                table_name.clone(),
+                struct_name.clone(),
+                pks_list.clone(),
+                multiple_pk,
+                relationships.clone()
+            ));
+
+            if table_name.contains("_to_"){
+                let rel_for_m_to_m = find_relationships(lines.clone(), table_name.clone(), true);
+                if rel_for_m_to_m.many_to_one.len()>0 {
+                    for rel in rel_for_m_to_m.many_to_one {
+                        str_model.push_str(&format!(
+                            "{}#[diesel(belongs_to({}))]\n",
+                            " ".repeat(indent_depth),
+                            rel.type_name
+                        ));
+                    }
+                    str_model = str_model.replace("*Associations*,","Associations,");
+                }
+            }
+            for rel in &relationships.many_to_one {
+                str_model.push_str(&format!(
+                    "{}#[diesel(belongs_to({}, foreign_key = {}_id))]\n",
+                    " ".repeat(indent_depth),
+                    rel.type_name,
+                    rel.field_name
+                ));
+            }
+            if relationships.many_to_one.len()>0 {
+                str_model = str_model.replace("*Associations*,","Associations,");
+            }else {
+                str_model = str_model.replace("*Associations*,","");
+            }
+
+            let r_many_to_many = find_many_to_many_relationships(lines.clone(), table_name.clone());
+
+            if r_many_to_many.len() > 0 {
+                let mut joined_params = "".to_string();
+                for rel in r_many_to_many {
+                    joined_params.push_str(&format!(
+                        "{}{} = {} by {}",
+                        if joined_params.len() == 0 {
+                            ""
+                        }else {
+                            ", "
+                        },
+                        rel.field_name,
+                        rel.type_name,
+                        propercase(&rel.table_name)
                     ));
                 }
+                str_model.push_str(&format!(
+                    "{}#[many_to_many({})]\n",
+                    " ".repeat(indent_depth),
+                    joined_params
+                ));
+            }
+
+            if add_table_name {
+                // add #[diesel(table_name = "name")]
+                str_model.push_str(&format!(
+                    "{}#[diesel(table_name = crate::schema::{})]\n",
+                    " ".repeat(indent_depth),
+                    vec[0].split('.').last().unwrap()
+                ));
+            }
+            if relationships.one_to_many.clone().len()>0{
+                let mut joined_params = "".to_string();
+                for rel in relationships.one_to_many.clone() {
+                    joined_params.push_str(&format!(
+                        "{}{} = {}",
+                        if joined_params.len() == 0 {
+                            ""
+                        }else {
+                            ", "
+                        },
+                        rel.field_name,
+                        rel.type_name
+                    ));
+                }
+                str_model.push_str(&format!(
+                    "{}#[one_to_many({})]\n",
+                    " ".repeat(indent_depth),
+                    joined_params
+                ));
             }
 
             str_model.push_str(&format!(
                 "{}pub struct {} {{\n",
+                " ".repeat(indent_depth),
+                struct_name
+            ));
+            str_ts_model.push_str(&format!(
+                "{}export interface {} {{\n",
                 " ".repeat(indent_depth),
                 struct_name
             ));
@@ -253,6 +431,7 @@ pub fn parse(
 
             let dict = match action {
                 "model" => &model_type_dict,
+                "ts_interface" => &ts_interface_type_dict,
                 _ => &proto_type_dict,
             };
             let is_optional = _type.clone().trim().starts_with("Nullable<");
@@ -293,6 +472,9 @@ pub fn parse(
             if type_string == "IpNetwork" {
                 type_ip = true;
             }
+            if type_string == "BitBool" {
+                type_bit_bool = true;
+            }
             if type_string == "Uuid" {
                 type_uuid = true;
             }
@@ -319,32 +501,61 @@ pub fn parse(
                 )
             };
 
-            if rust_style_fields && !vec[0].is_case(Case::Snake) {
-                let field_name = vec[0].to_case(Case::Snake);
+            let mut field_name = vec[0].to_string();
+            for rel_desc in relationships.many_to_one.iter_mut() {
+                if rel_desc.field_name.eq(&field_name.replace("_id","")) {
+                    let mut rel_dec_mod = rel_desc.clone();
+                    let old_typename  = rel_dec_mod.clone().type_name;
+                    if is_optional {
+                        rel_dec_mod.type_name = format!("Option<{}>", old_typename);
+                        rel_dec_mod.option = true;
+                    }
+                    str_model.push_str(&format!(
+                        "{}#[many_to_one({})]\n",
+                        " ".repeat(indent_depth + 4),
+                        rel_dec_mod.type_name
+                    ));
+                    if is_optional {
+                        rel_dec_mod.type_name = format!("Option::<model::{}>", old_typename);
+                    }else {
+                        rel_dec_mod.type_name = format!("model::{}", old_typename);
+                    }
+                    *rel_desc = rel_dec_mod;
+                }
+            }
+            if table_name.clone().eq(&field_name) {
                 str_model.push_str(&format!(
-                    "{}#[diesel(column_name = \"{}\")]\n{}pub {}: {},\n",
-                    " ".repeat(indent_depth + 4),
-                    &vec[0],
+                    "{}#[diesel(column_name = \"{}\")]\n",
                     " ".repeat(indent_depth + 4),
                     field_name,
-                    if is_optional {
-                        format!("Option<{}>", type_with_wrap)
-                    } else {
-                        type_with_wrap
-                    }
                 ));
-            } else {
-                str_model.push_str(&format!(
-                    "{}pub {}: {},\n",
-                    " ".repeat(indent_depth + 4),
-                    &vec[0],
-                    if is_optional {
-                        format!("Option<{}>", type_with_wrap)
-                    } else {
-                        type_with_wrap
-                    }
-                ));
+                field_name = "value".to_string();
             }
+            str_model.push_str(&format!(
+                "{}pub {}: {},\n",
+                " ".repeat(indent_depth + 4),
+                field_name,
+                if is_optional {
+                    format!("Option<{}>", type_with_wrap)
+                } else {
+                    type_with_wrap
+                }
+            ));
+            let mut field_name = vec[0].to_string();
+            str_ts_model.push_str(&format!(
+                "{}{}: {},\n",
+                " ".repeat(indent_depth + 4),
+                if is_optional {
+                    format!("{}?", field_name)
+                } else {
+                    field_name
+                },
+                if is_nullable_array {
+                    format!("[{}?]", type_string)
+                } else {
+                    type_string.to_string()
+                }
+            ));
             count += 1;
             if count == 1 {
                 let request_name = &format!("Enquire{}Request", &struct_name);
@@ -383,9 +594,17 @@ pub fn parse(
             //str_into_proto
             closable = true;
         } else if cmp.contains('}') && closable {
+            str_action.push_str(&generate_action(
+                table_name.clone(),
+                struct_name.clone(),
+                pks_list.clone(),
+                multiple_pk,
+                relationships.clone()
+            ));
             count = 0;
             str_model.push_str(" ".repeat(indent_depth).as_str());
             str_model.push_str("}\n");
+            str_ts_model.push_str("}\n\n");
             str_proto.push_str("}\n");
             //" ".repeat(8)
             str_from_proto.push_str("        }\n");
@@ -407,6 +626,9 @@ pub fn parse(
         str_request,
         str_rpc,
         str_model,
+        str_ts_model,
+        str_action,
+        str_crud_controller,
         str_from_proto,
         str_into_proto,
         type_nd,
@@ -417,6 +639,10 @@ pub fn parse(
         type_uuid,
         type_tz,
         type_jsonb,
+        type_new_insertable,
+        type_json_serializable,
+        type_bit_bool,
+        crud_methods,
     }
 }
 
@@ -455,253 +681,171 @@ fn propercase(s: &str) -> String {
     store.into_iter().collect()
 }
 
-#[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-    use std::io::prelude::*;
+fn singular(s: &String) -> String {
+    return pluralizer::pluralize(s, 1, false);
+    // let mut store: Vec<char> = s.chars().collect();
+    // if store.last() == Some(&'s') {
+    //     store.pop();
+    //     if store.last() == Some(&'e') {
+    //         store.pop();
+    //         if store.last() == Some(&'i') {
+    //             store.pop();
+    //             store.push('y');
+    //         } else {
+    //             store.push('e');
+    //         }
+    //     }
+    // }
+    // store.into_iter().collect()
+}
 
-    fn file_get_contents(fname: &str) -> String {
-        let mut f = ::std::fs::File::open(fname)
-            .expect("File not found. Please run in the directory with schema.rs.");
-        let mut contents = String::new();
-        f.read_to_string(&mut contents)
-            .expect("Something went wrong reading the file.");
+fn plural(s: &String) -> String {
+    return pluralizer::pluralize(s, 2, false);
+}
 
-        contents.replace('\r', "")
+handlebars_helper!(str_contains: |source: String, needle: String| source.contains(&needle));
+
+pub fn generate_action(
+    table_name: String,
+    class_name: String,
+    pks_list: Vec<String>,
+    multiple_pk: bool,
+    relationships:MappedRelationships,
+) -> std::string::String {
+    let table_name_singular = singular(&table_name);
+    let mut reg = Handlebars::new();
+    reg.register_escape_fn(handlebars::no_escape);
+    reg.register_helper("str-contains", Box::new(str_contains));
+    reg.register_template_file(
+        "action_template",
+        "./generator/src/action_template.handlebars",
+    )
+    .expect("error loading template");
+    let mut many_to_one_sorted = relationships.many_to_one.clone();
+    many_to_one_sorted.sort_by(|a, b| a.field_name.cmp(&b.field_name));
+    let has_rel = relationships.one_to_many.clone().len()>0;
+    return reg.render("action_template", &json!({"table_name": table_name, "class_name":class_name, "table_name_singular": table_name_singular, "pks_list":pks_list, "multiple_pk":multiple_pk, "one_to_many":relationships.one_to_many, "many_to_one":many_to_one_sorted, "has_rel":has_rel })).expect("error rendering template");
+}
+
+pub fn generate_crud_controllers(
+    table_name: String,
+    class_name: String,
+    pks_list: Vec<String>,
+    multiple_pk: bool,
+    relationships:MappedRelationships,
+) -> std::string::String {
+    let table_name_singular = singular(&table_name);
+    let mut reg = Handlebars::new();
+    reg.register_template_file(
+        "action_template",
+        "./generator/src/crud_controller_template.handlebars",
+    )
+    .expect("error loading template");
+    return reg.render("action_template", &json!({"table_name": table_name, "class_name":class_name, "table_name_singular": table_name_singular, "pks_list":pks_list, "multiple_pk":multiple_pk, "one_to_many":relationships.one_to_many })).expect("error rendering template");
+}
+
+#[derive(Clone,Serialize)]
+struct MappedRelationships {
+    many_to_one: Vec<RelationshipDesc>,
+    one_to_many: Vec<RelationshipDesc>,
+}
+
+#[derive(Clone,Serialize)]
+struct RelationshipDesc {
+    field_name: String,
+    type_name: String,
+    table_name: String,
+    option: bool
+}
+
+pub fn find_relationships(lines: std::str::Split<'_, char>, table_name: String, is_many_t_m_e: bool) -> MappedRelationships {
+    let mut r_many_to_one: Vec<RelationshipDesc> = Vec::new();
+    let mut r_one_to_many: Vec<RelationshipDesc> = Vec::new();
+    let pattern_one_to_many = format!(" -> {table_name} ");
+    let pattern_many_to_one = format!("diesel::joinable!({table_name} -> ");
+    let pattern_many_to_many = format!("_to_");
+    for line in lines {
+        if let Some(index) = line.find(&pattern_many_to_many) {
+            if !(is_many_t_m_e && table_name.contains(&pattern_many_to_many)){
+                continue;
+            }  
+        }
+        if let Some(index) = line.find(&pattern_one_to_many) {
+            if index > 0 {
+                if let Some(before_match_str) = line.get(0..index) {
+                    let related_table = before_match_str
+                        .to_string()
+                        .replace("diesel::joinable!(", "");
+                    let type_name = propercase(&related_table);
+                    let field_name = plural(&related_table);
+                    let data = RelationshipDesc {
+                        field_name,
+                        type_name,
+                        table_name:related_table,
+                        option: false
+                    };
+                    r_one_to_many.push(data);
+                }
+            }
+        }
+        if line.contains(&pattern_many_to_one) {
+            let trimmed_line = line.replace(&pattern_many_to_one, "");
+            if let Some(t_name_i) = trimmed_line.find(" (") {
+                if let Some(t_name) = trimmed_line.get(0..t_name_i) {
+                    if let Some(end_i) = trimmed_line.find(")") {
+                        if let Some(column_name) = trimmed_line.get(t_name_i + 2..end_i) {
+                            let type_name = propercase(&t_name);
+                            let field_name = column_name.to_string().replace("_id", "");
+                            let data = RelationshipDesc {
+                                field_name,
+                                type_name,
+                                table_name:t_name.to_string(),
+                                option: false
+                            };
+                            r_many_to_one.push(data);
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    #[test]
-    fn build_normal() {
-        let parse_output = super::parse(
-            file_get_contents("test_data/schema.rs"),
-            "model",
-            None,
-            false,
-            &mut HashMap::default(),
-            "2",
-            false,
-        );
-        println!("str_proto shows as follow:\n{}", parse_output.str_proto);
-        assert_eq!(parse_output.str_proto.chars().count(), 266);
-        assert_eq!(parse_output.str_into_proto.chars().count(), 708);
-        assert_eq!(parse_output.str_from_proto.chars().count(), 680);
-        assert_eq!(parse_output.str_request.chars().count(), 109);
-        assert_eq!(parse_output.str_rpc.chars().count(), 151);
-        println!("str_model shows as follow:\n{}", parse_output.str_model);
-        assert_eq!(
-            parse_output.str_model,
-            file_get_contents("test_data/expected_output/schema.rs")
-        );
-        assert!(!parse_output.type_nd);
-        assert!(parse_output.type_ndt);
-        assert!(!parse_output.type_nt);
-        assert!(parse_output.type_bd);
-        assert!(!parse_output.type_ip);
-        assert!(!parse_output.type_uuid);
-        assert!(parse_output.type_tz);
+    return MappedRelationships {
+        many_to_one: r_many_to_one,
+        one_to_many: r_one_to_many,
+    };
+}
+
+pub fn find_many_to_many_relationships(lines: std::str::Split<'_, char>, table_name: String) -> Vec<RelationshipDesc> {
+    let mut r_many_to_many: Vec<RelationshipDesc> = Vec::new();
+    let current_table_rel = format!(" -> {table_name} ");
+    let join_line = format!("diesel::joinable!(");
+    let pattern_many_to_many = format!("diesel::joinable!({table_name}_to_");
+    for line in lines {
+        if line.contains(&pattern_many_to_many) {
+            if line.find(&current_table_rel).is_none() {
+                let new_line = line.replace(&pattern_many_to_many, "");
+                if let Some(f_i) = new_line.find(" ->"){
+                    if let Some(f_name) = new_line.get(0..f_i){
+                        let field_name = plural(&f_name.to_string());
+                        if let Some(t_i) = new_line.find(" ("){
+                            if let Some(table_name) = new_line.get((f_i+4)..t_i){
+                                let type_name = propercase(&table_name);
+                                let m_table_name = line.get(join_line.len()..pattern_many_to_many.len()+f_i).expect("can not extract table name");
+                                let data = RelationshipDesc {
+                                    field_name,
+                                    type_name,
+                                    table_name:m_table_name.to_string(),
+                                    option: false
+                                };
+                                r_many_to_many.push(data);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    #[test]
-    fn build_with_localmodded() {
-        let parse_output = super::parse(
-            file_get_contents("test_data/schema_localmodded.rs"),
-            "model",
-            None,
-            false,
-            &mut HashMap::default(),
-            "2",
-            false,
-        );
-        println!("{}", parse_output.str_model);
-        assert_eq!(
-            parse_output.str_model,
-            file_get_contents("test_data/expected_output/schema_localmodded.rs")
-        );
-        assert!(!parse_output.type_nd);
-        assert!(!parse_output.type_ndt);
-        assert!(!parse_output.type_nt);
-        assert!(!parse_output.type_bd);
-        assert!(!parse_output.type_ip);
-        assert!(!parse_output.type_uuid);
-        assert!(!parse_output.type_tz);
-    }
-
-    #[test]
-    fn build_with_ip_bytea() {
-        let parse_output = super::parse(
-            file_get_contents("test_data/schema_with_ip_bytea.rs"),
-            "model",
-            None,
-            false,
-            &mut HashMap::default(),
-            "2",
-            false,
-        );
-        print!("{}", parse_output.str_model);
-        assert_eq!(
-            parse_output.str_model,
-            file_get_contents("test_data/expected_output/schema_with_ip_bytea.rs")
-        );
-        assert!(!parse_output.type_nd);
-        assert!(!parse_output.type_ndt);
-        assert!(!parse_output.type_nt);
-        assert!(!parse_output.type_bd);
-        assert!(parse_output.type_ip);
-        assert!(!parse_output.type_uuid);
-        assert!(!parse_output.type_tz);
-    }
-
-    #[test]
-    fn build_with_tab() {
-        let parse_output = super::parse(
-            file_get_contents("test_data/schema_with_tab.rs"),
-            "model",
-            None,
-            false,
-            &mut HashMap::default(),
-            "2",
-            false,
-        );
-        print!("{}", parse_output.str_model);
-
-        assert_eq!(parse_output.str_model.chars().count(), 85);
-    }
-
-    #[test]
-    fn build_with_time() {
-        let parse_output = super::parse(
-            file_get_contents("test_data/schema_with_time.rs"),
-            "model",
-            None,
-            false,
-            &mut HashMap::default(),
-            "2",
-            false,
-        );
-        print!("{}", parse_output.str_model);
-        assert_eq!(parse_output.str_model.chars().count(), 88);
-        assert!(parse_output.type_nt);
-    }
-
-    #[test]
-    fn build_with_ies() {
-        let parse_output = super::parse(
-            file_get_contents("test_data/schema_with_ies.rs"),
-            "model",
-            None,
-            false,
-            &mut HashMap::default(),
-            "2",
-            false,
-        );
-        print!("{}", parse_output.str_model);
-        assert_eq!(
-            parse_output.str_model,
-            file_get_contents("test_data/expected_output/schema_with_ies.rs")
-        );
-    }
-
-    #[test]
-    fn build_with_identifiable() {
-        let parse_output = super::parse(
-            file_get_contents("test_data/schema.rs"),
-            "model",
-            Some("Identifiable".to_string()),
-            false,
-            &mut HashMap::default(),
-            "2",
-            false,
-        );
-        print!("{}", parse_output.str_model);
-    }
-
-    #[test]
-    fn build_with_uuid() {
-        let parse_output = super::parse(
-            file_get_contents("test_data/schema_uuid.rs"),
-            "model",
-            None,
-            false,
-            &mut HashMap::default(),
-            "2",
-            false,
-        );
-        assert!(parse_output.type_uuid);
-        assert_eq!(
-            parse_output.str_model,
-            file_get_contents("test_data/expected_output/schema_with_uuid.rs")
-        );
-    }
-
-    #[test]
-    fn build_with_mysql() {
-        let parse_output = super::parse(
-            file_get_contents("test_data/schema_mysql.rs"),
-            "model",
-            None,
-            false,
-            &mut HashMap::default(),
-            "2",
-            false,
-        );
-        print!("a:{}", parse_output.str_model);
-        assert_eq!(
-            parse_output.str_model,
-            file_get_contents("test_data/expected_output/schema_mysql.rs")
-        );
-    }
-
-    #[test]
-    fn build_with_jsonb() {
-        let parse_output = super::parse(
-            file_get_contents("test_data/schema_with_jsonb.rs"),
-            "model",
-            None,
-            false,
-            &mut HashMap::default(),
-            "2",
-            false,
-        );
-        print!("a:{}", parse_output.str_model);
-        assert_eq!(
-            parse_output.str_model,
-            file_get_contents("test_data/expected_output/schema_jsonb.rs")
-        );
-    }
-
-    #[test]
-    fn build_with_tablename_derives() {
-        let parse_output = super::parse(
-            file_get_contents("test_data/schema_with_tablename_derives.rs"),
-            "model",
-            None,
-            true,
-            &mut HashMap::default(),
-            "2",
-            false,
-        );
-        print!("a:{}", parse_output.str_model);
-        assert_eq!(
-            parse_output.str_model,
-            file_get_contents("test_data/expected_output/schema_with_tablename_derives.rs")
-        );
-    }
-
-    #[test]
-    fn build_with_rust_style_fields() {
-        let parse_output = super::parse(
-            file_get_contents("test_data/schema_with_rust_style_fields.rs"),
-            "model",
-            None,
-            false,
-            &mut HashMap::default(),
-            "2",
-            true,
-        );
-        print!("a:{}", parse_output.str_model);
-        assert_eq!(
-            parse_output.str_model,
-            file_get_contents("test_data/expected_output/schema_with_rust_style_fields.rs")
-        );
-    }
+    return r_many_to_many;
 }

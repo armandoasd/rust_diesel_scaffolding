@@ -1,0 +1,60 @@
+
+// -- Start {{table_name}}
+
+{{#unless multiple_pk}}
+pub fn find_{{table_name_singular}}_by_uid(
+    uid: i64,
+    conn: &mut MysqlConnection,
+) -> Result<Option<model::{{class_name}}>, diesel::result::Error> {
+    use crate::schema::{{table_name}}::dsl::*;
+    
+    let result = {{table_name}}
+        .filter(id.eq(uid))
+        .first::<model::{{class_name}}>(conn)
+        .optional()?;
+        
+    Ok(result)
+}
+
+pub fn insert_new_{{table_name_singular}}(
+    data: model::New{{class_name}},
+    conn: &mut MysqlConnection,
+) -> Result<model::New{{class_name}}, diesel::result::Error> {
+    use crate::schema::{{table_name}}::dsl::*;
+
+    diesel::insert_into({{table_name}}).values(&data).execute(conn)?;
+
+    Ok(data)
+}
+
+
+
+pub fn find_{{table_name}}(
+    conn: &mut MysqlConnection,
+) -> Result<Vec<model::{{class_name}}>, diesel::result::Error> {
+
+    Ok(fetch_{{table_name_singular}}_list(conn))
+}
+
+#[once]
+pub fn fetch_{{table_name_singular}}_list(
+    conn: &mut MysqlConnection,
+)->Vec<model::{{class_name}}>{
+    use crate::schema::{{table_name}}::dsl::*;
+    return {{table_name}}
+        .select(model::{{class_name}}::as_select())
+        .load(conn)
+        .unwrap();
+}
+
+{{#if has_rel}}
+pub fn find_{{table_name_singular}}_with_all(
+    conn: &mut MysqlConnection,
+) -> Result<Vec<model::{{class_name}}WithAll>, diesel::result::Error> {
+
+    Ok(model::{{class_name}}::find_all_eager(conn))
+}
+
+{{/if}}
+{{/unless}}
+// -- End {{table_name_singular}}

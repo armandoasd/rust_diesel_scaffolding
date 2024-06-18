@@ -1,0 +1,34 @@
+{{#if one_to_many[0]}}
+#[once]
+fn fetch_{{table_name_singular}}_with_all_list(
+    conn: &mut MysqlConnection,
+)->Vec<model::{{class_name}}WithAll>{
+    use crate::schema::*;
+
+    let lookup_id_i:BTreeMap<i64, usize> = BTreeMap::new();
+    let ret_data:Vec<model::{{class_name}}WithAll> = Vec::new();
+
+    let {{table_name}}_with_all = {{table_name}}::table
+    {{#each one_to_many}}
+        .inner_join({{table_name}}::table)
+    {{/each}}
+        .select((model::{{class_name}}::as_select(){{#each one_to_many}}, model::{{type_name}}::as_select(){{/each}}))
+        .load::<(model::{{class_name}}{{#each one_to_many}},model::{{type_name}}{{/each}})>(conn).unwrap();
+
+    
+    for query_row in {{table_name}}_with_all {
+        if lookup_id_i.contains_key(&query_row.0.id) {
+            if let Some(index) = lookup_id_i.get(&query_row.0.id) {
+                ret_data[*index].insert_data(query_row);
+            }
+        }else {
+            let data = model::{{class_name}}WithAll::new_builder(query_row.0)
+                .insert_data(query_row);
+            lookup_id_i.insert(query_row.0.id, ret_data.len());
+            ret_data.push(data)
+        }
+    }
+    return ret_data;
+}
+
+{{/if}}

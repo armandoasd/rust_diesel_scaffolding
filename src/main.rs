@@ -38,6 +38,9 @@ fn print_normal_dependencies(parse_output: &parse::ParseOutput) {
     if parse_output.type_ip {
         println!("use ipnetwork::IpNetwork;");
     }
+    if parse_output.type_bit_bool {
+        println!("use crate::diesel_types::BitBool;");
+    }
     if parse_output.type_uuid {
         println!("use uuid::Uuid;");
     }
@@ -47,6 +50,13 @@ fn print_normal_dependencies(parse_output: &parse::ParseOutput) {
     }
     if parse_output.type_jsonb {
         println!("use serde_json::Value;");
+    }
+    if parse_output.type_new_insertable {
+        println!("use diesel::prelude::*;");
+        println!("use diesel_autoincrement_new_struct::{{apply, NewInsertable}};");
+    }
+    if parse_output.type_json_serializable {
+        println!("use serde::{{Deserialize, Serialize}};");
     }
 }
 fn print_conversion_dependencies() {
@@ -97,6 +107,9 @@ fn main() {
     opts.optflag("h", "help", "Print this help menu");
 
     opts.optflag("m", "model", "Set as model output");
+    opts.optflag("a", "action", "Set as action output");
+    opts.optflag("C", "controller", "Set as controller output");
+    opts.optflag("J", "ts_interface", "Set as controller output");
     opts.optmulti(
         "M",
         "map",
@@ -177,6 +190,12 @@ fn main() {
             .unwrap_or_else(|| "class_name".to_string());
     } else if matches.opt_present("p") {
         action = "proto";
+    } else if matches.opt_present("a") {
+        action = "action";
+    } else if matches.opt_present("C") {
+        action = "controller";
+    } else if matches.opt_present("J") {
+        action = "ts_interface";
     } else {
         //default as m
         action = "model";
@@ -248,8 +267,46 @@ fn main() {
             println!("#![allow(clippy::all)]\n");
 
             println!("{}", import_type_string);
+            println!("use abstract_orm::Joinable;");
+            println!("pub trait TableName {{
+                type Item;
+                fn get_table_ref() -> Self::Item;
+            }}");
             print_normal_dependencies(&parse_output);
             println!("{}", parse_output.str_model);
+        }
+        "action" => {
+            println!("use diesel::prelude::*;");
+            println!("use cached::proc_macro::once;");
+            println!("use crate::model;");
+            println!("use std::collections::BTreeMap;");
+            println!("{}", parse_output.str_action);
+        }
+        "ts_interface" => {
+            println!("{}", parse_output.str_ts_model);
+        }
+        "controller" => {
+            println!("use ntex::web;");
+            println!("use crate::model;");
+            println!("use crate::db;");
+            println!("use crate::actions;");
+
+            println!("{}", parse_output.str_crud_controller);
+
+            println!("pub fn wire_routes(cfg: &mut web::ServiceConfig){{");
+            let mut index = 0;
+            for service in parse_output.crud_methods.iter() {
+                
+                if index == 0 {
+                    println!("    cfg.service({})", service);
+                }else if index == parse_output.crud_methods.len()-1 {
+                    println!("       .service({});", service);
+                }else {
+                    println!("       .service({})", service);
+                }
+                index +=1;
+            }
+            println!("\n}}");
         }
         "from_proto" => {
             print_conversion_dependencies();
